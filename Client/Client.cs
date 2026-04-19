@@ -134,7 +134,7 @@ namespace Client
             }
             catch (Exception exc)
             {
-                throw exc;
+                throw;
             }
         }
 

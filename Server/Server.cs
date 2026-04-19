@@ -60,47 +60,32 @@ namespace Server
             participants = new List<ServerParticipant>();
 
             started = false;
-
-            tcpListenerThread = new Thread(TcpListener);
-            tcpListenerThread.Start();
-
-            udpListenerThread = new Thread(UdpListener);
-            udpListenerThread.Start();
         }
 
         public void Start()
         {
+            started = true;
             tcpServer.Start();
 
-            if (!tcpListenerThread.IsAlive)
+            if (tcpListenerThread == null || !tcpListenerThread.IsAlive)
             {
+                tcpListenerThread = new Thread(TcpListener);
                 tcpListenerThread.Start();
             }
 
-            if (!udpListenerThread.IsAlive)
+            if (udpListenerThread == null || !udpListenerThread.IsAlive)
             {
+                udpListenerThread = new Thread(UdpListener);
                 udpListenerThread.Start();
             }
-
-            started = true;
         }
 
         public void Stop()
         {
-            if (tcpListenerThread.IsAlive)
-            {
-                tcpListenerThread.Abort();
-            }
-
-            if (udpListenerThread.IsAlive)
-            {
-                udpListenerThread.Abort();
-            }
+            started = false;
 
             tcpServer.Stop();
             udpServer.Close();
-
-            started = false;
         }
 
         private void TcpListener()
@@ -110,111 +95,108 @@ namespace Server
                 byte[] bytes = new byte[64];
                 string data = "";
 
-                while (true)
+                while (started)
                 {
-                    if (started)
+                    if (tcpServer.Pending())
                     {
-                        if (tcpServer.Pending())
-                        {
-                            participants.Add(new ServerParticipant(tcpServer.AcceptTcpClient()));
-                        }
+                        participants.Add(new ServerParticipant(tcpServer.AcceptTcpClient()));
+                    }
 
-                        foreach (ServerParticipant participant in participants)
+                    foreach (ServerParticipant participant in participants)
+                    {
+                        NetworkStream stream = participant.Client.GetStream();
+                        if (stream.DataAvailable)
                         {
-                            NetworkStream stream = participant.Client.GetStream();
-                            if (stream.DataAvailable)
+                            int i;
+
+                            while (stream.DataAvailable && (i = stream.Read(bytes, 0, bytes.Length)) != 0)
                             {
-                                int i;
+                                data = Encoding.ASCII.GetString(bytes, 0, i);
 
-                                while (stream.DataAvailable && (i = stream.Read(bytes, 0, bytes.Length)) != 0)
+                                Packet packet = Packet.Populate(data);
+
+                                if (packet.PacketType == PacketType.Connect)
                                 {
-                                    data = Encoding.ASCII.GetString(bytes, 0, i);
-
-                                    Packet packet = Packet.Populate(data);
-
-                                    if (packet.PacketType == PacketType.Connect)
+                                    if (participants.Count() >= 6)
                                     {
-                                        if (participants.Count() >= 6)
-                                        {
-                                            participant.RemoveFromServer = true;
+                                        participant.RemoveFromServer = true;
 
-                                            Send(stream, new Packet()
+                                        Send(stream, new Packet()
+                                        {
+                                            PacketType = PacketType.Connect,
+                                            Content = "FULL"
+                                        });
+                                    }
+                                    else if (participants.Any(p => p.Nickname == packet.Content))
+                                    {
+                                        participant.RemoveFromServer = true;
+
+                                        Send(stream, new Packet()
                                             {
                                                 PacketType = PacketType.Connect,
-                                                Content = "FULL"
+                                                Content = "UNAVAILABLE"
                                             });
-                                        }
-                                        else if (participants.Any(p => p.Nickname == packet.Content))
-                                        {
-                                            participant.RemoveFromServer = true;
-
-                                            Send(stream, new Packet()
-                                                {
-                                                    PacketType = PacketType.Connect,
-                                                    Content = "UNAVAILABLE"
-                                                });
-                                        }
-                                        else
-                                        {
-                                            participant.Nickname = packet.Content;
-
-                                            Send(stream, new Packet()
-                                            {
-                                                PacketType = PacketType.Connect,
-                                                Content = String.Join("|", participants.Select(p => p.Nickname))
-                                            });
-
-                                            SendAll(new Packet()
-                                                {
-                                                    PacketType = PacketType.Join,
-                                                    Content = packet.Content
-                                                }, packet.Content);
-
-                                            OnServerUpdated(this, new ServerUpdatedEventArgs(participants));
-                                        }
                                     }
-                                    else if (packet.PacketType == PacketType.Disconnect)
+                                    else
                                     {
-                                        if (participant.Nickname == packet.Content)
-                                        {
-                                            SendAll(new Packet()
-                                            {
-                                                PacketType = PacketType.Disconnect,
-                                                Content = participant.Nickname
-                                            }, participant.Nickname);
-                                            participant.RemoveFromServer = true;
-                                            OnServerUpdated(this, new ServerUpdatedEventArgs(participants.Where(p => !p.RemoveFromServer).ToList<ServerParticipant>()));
-                                        }
-                                    }
-                                    else if (packet.PacketType == PacketType.PowerUp)
-                                    {
-                                        foreach (ServerParticipant receiver in participants.Where(p => !p.RemoveFromServer && p.Nickname != participant.Nickname))
-                                        {
-                                            NetworkStream receiverStream = receiver.Client.GetStream();
+                                        participant.Nickname = packet.Content;
 
-                                            Send(receiverStream, packet);
-                                        }
+                                        Send(stream, new Packet()
+                                        {
+                                            PacketType = PacketType.Connect,
+                                            Content = String.Join("|", participants.Select(p => p.Nickname))
+                                        });
+
+                                        SendAll(new Packet()
+                                            {
+                                                PacketType = PacketType.Join,
+                                                Content = packet.Content
+                                            }, packet.Content);
+
+                                        OnServerUpdated(this, new ServerUpdatedEventArgs(participants));
+                                    }
+                                }
+                                else if (packet.PacketType == PacketType.Disconnect)
+                                {
+                                    if (participant.Nickname == packet.Content)
+                                    {
+                                        SendAll(new Packet()
+                                        {
+                                            PacketType = PacketType.Disconnect,
+                                            Content = participant.Nickname
+                                        }, participant.Nickname);
+                                        participant.RemoveFromServer = true;
+                                        OnServerUpdated(this, new ServerUpdatedEventArgs(participants.Where(p => !p.RemoveFromServer).ToList<ServerParticipant>()));
+                                    }
+                                }
+                                else if (packet.PacketType == PacketType.PowerUp)
+                                {
+                                    foreach (ServerParticipant receiver in participants.Where(p => !p.RemoveFromServer && p.Nickname != participant.Nickname))
+                                    {
+                                        NetworkStream receiverStream = receiver.Client.GetStream();
+
+                                        Send(receiverStream, packet);
                                     }
                                 }
                             }
                         }
+                    }
 
-                        participants.RemoveAll(p => p.RemoveFromServer);
+                    participants.RemoveAll(p => p.RemoveFromServer);
 
-                        if (participants.Count > 0)
-                        {
-                            Thread.Sleep(5);
-                        }
-                        else
-                        {
-                            Thread.Sleep(50);
-                        }
+                    if (participants.Count > 0)
+                    {
+                        Thread.Sleep(5);
+                    }
+                    else
+                    {
+                        Thread.Sleep(50);
                     }
                 }
             }
             catch (Exception exc)
             {
-                if (exc.GetType() != typeof(ThreadAbortException))
+                if (started)
                     ErrorHandler.ShowDialog("TCP Packet could not be read", "The receiving or reading of a TCP Packet caused an error.", exc);
             }
         }
@@ -223,7 +205,7 @@ namespace Server
         {
             string data = "";
 
-            while (true)
+            while (started)
             {
                 try
                 {
@@ -278,21 +260,32 @@ namespace Server
                 }
                 catch (SocketException exc)
                 {
+                    if (!started)
+                    {
+                        break;
+                    }
+
                     if (exc.ErrorCode == 10054)
                     {
                         // Participant closed the Client - no action is required as the Server will clean it up automatically
                     }
                 }
+                catch (ObjectDisposedException)
+                {
+                    if (!started)
+                    {
+                        break;
+                    }
+                }
                 catch (Exception exc)
                 {
+                    if (!started)
+                    {
+                        break;
+                    }
+
                     Console.WriteLine(exc.Message);
                 }
-
-                //Console.WriteLine("Handling client at " + ipEndPoint + " - ");
-                //Console.WriteLine("Message Received " + data.TrimEnd());
-
-                //server.Send(receivedBytes, receivedBytes.Length, remoteIPEndPoint);
-                //Console.WriteLine("Message Echoed to" + remoteIPEndPoint + data);
             }
         }
 
